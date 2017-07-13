@@ -1,0 +1,1 @@
+C:\laragon\bin\php\php-7.1.5-Win32-VC14-x64\php.exe C:\oferia\oferia-notify
