@@ -36,8 +36,8 @@ class Main extends Command
             'database_type' => 'mysql',
             'database_name' => 'oferia_notifier',
             'server'        => 'localhost',
-            'username'      => 'root',
-            'password'      => 'Ne3xvm86',
+            'username'      => 'oferia_notifier',
+            'password'      => 'SorkForkZap2223!',
         ]);
 
         parent::__construct();
