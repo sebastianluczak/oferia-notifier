@@ -15,6 +15,7 @@ if (! defined('BASE_PATH')) {
     define('BASE_PATH', dirname(__DIR__));
 }
 
+$dotEnvConfig = new App\Service\ConfigService;
 $container = new Illuminate\Container\Container;
 $dispatcher = new Illuminate\Events\Dispatcher($container);
 $app = new App\Console\Application($container, $dispatcher);

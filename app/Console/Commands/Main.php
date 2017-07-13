@@ -2,19 +2,39 @@
 
 namespace App\Console\Commands;
 
+use App\Service\DatabaseService;
+use App\Service\DomParserService;
+use App\Service\OSNotifierService;
+use App\Service\SlackNotifierService;
 use Illuminate\Console\Command;
-use Joli\JoliNotif\Notification;
-use Joli\JoliNotif\NotifierFactory;
-use PHPHtmlParser\Dom;
+use PHPHtmlParser\Dom\Collection;
 use PHPHtmlParser\Dom\HtmlNode;
-use Medoo\Medoo;
 
+/**
+ * Class Main
+ * @package App\Console\Commands
+ */
 class Main extends Command
 {
     /**
-     * @var Medoo
+     * @var DatabaseService
      */
-    protected $database;
+    protected $databaseService;
+
+    /**
+     * @var SlackNotifierService
+     */
+    protected $slackService;
+
+    /**
+     * @var OSNotifierService
+     */
+    protected $notifierService;
+
+    /**
+     * @var DomParserService
+     */
+    protected $domParserService;
 
     /**
      * The name and signature of the console command.
@@ -28,17 +48,17 @@ class Main extends Command
      *
      * @var string
      */
-    protected $description = 'The main app command';
+    protected $description = 'Looks for oferia.pl offers, saves in DB and notifies user via Slack Service';
 
+    /**
+     * Main constructor.
+     */
     public function __construct()
     {
-        $this->database = new Medoo([
-            'database_type' => 'mysql',
-            'database_name' => 'oferia_notifier',
-            'server'        => 'localhost',
-            'username'      => 'oferia_notifier',
-            'password'      => 'SorkForkZap2223!',
-        ]);
+        $this->databaseService = new DatabaseService();
+        $this->slackService = new SlackNotifierService();
+        $this->notifierService = new OSNotifierService();
+        $this->domParserService = new DomParserService();
 
         parent::__construct();
     }
@@ -48,47 +68,65 @@ class Main extends Command
      */
     public function handle(): void
     {
-        $offersFromFirstPage = $this->loadAllOffers();
+        $offersFromFirstPage = $this->domParserService->loadOffers();
+        $offersProcessed = $this->processOffers($offersFromFirstPage);
 
-        $this->processOffers($offersFromFirstPage);
-
-        $offersFromSecond = $this->loadAllOffers($secondPage = true);
-
-        $this->processOffers($offersFromSecond);
-    }
-
-    /**
-     * @param string $title
-     * @param string $body
-     */
-    protected function notify(string $title, string $body)
-    {
-        $notifier = NotifierFactory::create();
-
-        $notification =
-            (new Notification())
-                ->setTitle($title)
-                ->setBody($body)
-        ;
-
-        $notifier->send($notification);
-    }
-
-    /**
-     * @param bool $secondPage
-     * @return string
-     */
-    protected function loadURL(bool $secondPage = false)
-    {
-        $dom = new Dom;
-        $url = 'http://oferia.pl/zlecenia/programowanie-it';
-        if ($secondPage) {
-            $url = $url . '?strona=2';
+        if ($offersProcessed >= 15) {
+            // we should look for second page, oferia.pl sometimes limits page views to non-commercial offers = 15
+            $offersFromSecond = $this->domParserService->loadOffers($secondPage = true);
+            $this->processOffers($offersFromSecond);
         }
-        $dom->loadFromUrl($url);
-        $html = $dom->outerHtml;
 
-        return $html;
+    }
+
+    /**
+     * @param Collection $offers
+     * @return int
+     */
+    protected function processOffers(Collection $offers)
+    {
+        $count = 0;
+        foreach ($offers as $item) {
+            $offerLink = $item->find('a')[0];
+            if ($offerLink) {
+                if ($this->handleOfferLink($offerLink)) {
+                    $count++;
+                }
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * @param HtmlNode $offerLink
+     * @return bool
+     */
+    protected function handleOfferLink(HtmlNode $offerLink)
+    {
+        $link = $offerLink->__get('href');
+        $title = $offerLink->__get('text');
+
+        if (!$this->databaseService->checkIfOfferExists($title, $link)) {
+            $verify = $this->databaseService->insertOffer($title, $link);
+
+            if ($verify) {
+                $this->info($title);
+                if (getenv('NOTIFY_VIA_SLACK')) {
+                    $this->slackService->send($title);
+                }
+
+                if (getenv('NOTIFY_VIA_DESKTOP')) {
+                    $this->notifierService->send($title, $link);
+                }
+
+                return true;
+            } else {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -97,97 +135,5 @@ class Main extends Command
     public function __toString()
     {
         return $this->signature;
-    }
-
-    /**
-     * @param bool $secondPage
-     * @return Dom\Collection|HtmlNode
-     * @throws \Exception
-     */
-    protected function loadAllOffers(bool $secondPage = false): Dom\Collection
-    {
-        $html = $this->loadURL($secondPage);
-        $dom = new Dom;
-        $dom->load($html);
-        /** @var HtmlNode $t */
-        $t = $dom->find('h2[class="listing-order-name"]');
-
-        if ($t) {
-            return $t;
-        } else {
-            throw new \Exception('No offers!');
-        }
-    }
-
-    /**
-     * @param Dom\Collection|HtmlNode $offers
-     */
-    protected function processOffers(Dom\Collection $offers)
-    {
-        foreach ($offers as $item) {
-            $offerLink = $item->find('a')[0];
-            if ($offerLink) {
-                $this->handleOfferLink($offerLink);
-            }
-        }
-    }
-
-    /**
-     * @param HtmlNode $offerLink
-     */
-    protected function handleOfferLink(HtmlNode $offerLink)
-    {
-        if (!$this->offerExists($offerLink->text, $offerLink->href)) {
-            $this->insertOfferIntoDatabase($offerLink->text, $offerLink->href);
-        }
-    }
-
-    /**
-     * @param string $offerName
-     * @param string $link
-     * @return string
-     */
-    protected function generateUUID(string $offerName, string $link)
-    {
-        return md5($offerName . '----' . $link);
-    }
-
-    /**
-     * @param string $offerName
-     * @param string $link
-     */
-    protected function insertOfferIntoDatabase(string $offerName, string $link)
-    {
-        $verify = $this->database->insert('offer', [
-            'url' => $link,
-            'title' => $offerName,
-            'uuid' => $this->generateUUID($offerName, $link)
-        ]);
-
-        if ($verify) {
-            $this->info('Nowa oferta: ' . $offerName);
-
-            $this->notify($offerName, $link);
-        }
-    }
-
-    /**
-     * @param string $offerName
-     * @param string $link
-     * @return bool
-     */
-    protected function offerExists(string $offerName, string $link)
-    {
-        $data = $this->database->select('offer', [
-            'id'
-        ], [
-            'uuid' => $this->generateUUID($offerName, $link)
-        ]);
-
-        if (count($data) == 0) {
-            return false;
-        } else {
-            return true;
-        }
     }
 }
